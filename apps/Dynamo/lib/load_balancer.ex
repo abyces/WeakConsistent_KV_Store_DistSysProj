@@ -10,6 +10,10 @@ defmodule LoadBalancer do
 
   defstruct(
     view: nil,
+    replica_cnt: nil,
+    hash_ring: nil,
+    hash_avl: nil,
+    hash_to_node: nil,
     node_cnt: nil,
     node_status: nil,
     status_check_timeout: nil,
@@ -18,6 +22,7 @@ defmodule LoadBalancer do
   require Fuzzers
   require Logger
   require System
+  require AVLTree
 
   @doc """
   This function resets the status check timer
@@ -34,22 +39,38 @@ defmodule LoadBalancer do
   @doc """
   This function initializes a new load balancer config
   """
-  @spec new_loadbalancer([atom()], non_neg_integer()) :: %LoadBalancer{}
-  def new_loadbalancer(view, status_check_timeout) do
+  @spec new_loadbalancer([atom()], non_neg_integer(), non_neg_integer()) :: %LoadBalancer{}
+  def new_loadbalancer(view, status_check_timeout, replica_cnt) do
+    hash_to_node =
+      view
+      |> Enum.map(fn v -> {String.to_integer(:crypto.hash(:md5, Atom.to_string(v)) |> Base.encode16(), 16), v} end)
+      |> Map.new()
+
+    hash_avl =
+      hash_to_node
+      |> Enum.map(fn {k, v} -> k end)
+      |> Enum.into(AVLTree.new())
+
+    hash_ring = AVLTree.inorder_traverse(hash_avl)
+
     cur_timestamp = System.os_time(:millisecond)
     node_status =
       view
         |> Enum.map(fn v -> {v, {0, cur_timestamp, :alive}} end)
         |> Map.new()
+
     node_cnt = length(view)
     %LoadBalancer{
       view: view,
+      replica_cnt: replica_cnt,
+      hash_ring: hash_ring,
+      hash_avl: hash_avl,
+      hash_to_node: hash_to_node,
       node_cnt: node_cnt,
       node_status: node_status,
       status_check_timeout: status_check_timeout,
       status_check_timer: nil
     }
-
   end
 
   @doc """
@@ -63,15 +84,16 @@ defmodule LoadBalancer do
   @doc """
   This function walks clockwise on the ring to find the first alive node, if all nodes failed then return :fail
   """
-  @spec clockwise_walk(%LoadBalancer{}, non_neg_integer(), integer(), non_neg_integer()) :: atom()
-  def clockwise_walk(state, idx, cnt, node_cnt) do
-    if cnt == -1 do
-      :fail
-    else
-      case elem(state.node_status[Emun.at(state.view, idx)], 2) do
-        :alive -> Emun.at(state.view, idx)
-        _ -> clockwise_walk(state, get_node_idx(idx + 1, node_cnt), cnt - 1, node_cnt)
-      end
+  @spec clockwise_walk(%LoadBalancer{}, [integer()]) :: atom()
+  def clockwise_walk(state, hash_list) do
+    case hash_list do
+      [] -> :fail
+      [hd | tl] ->
+        node = state.hash_to_node[hd]
+        case elem(state.node_status[node], 2) do
+          :alive -> node
+          _ ->clockwise_walk(state, tl)
+        end
     end
   end
 
@@ -124,7 +146,7 @@ defmodule LoadBalancer do
   @spec gossip_table_update_heartbeat(%LoadBalancer{}, atom()) :: %LoadBalancer{}
   defp gossip_table_update_heartbeat(state, node_id) do
     {cnt, _, _} = state.node_status[node_id]
-    %{state | node_status: Map.put(state.node_status, node_id, {cnt+1, System.cur_time(:millisecond), :alive})}
+    %{state | node_status: Map.put(state.node_status, node_id, {cnt+1, System.os_time(:millisecond), :alive})}
   end
 
 
@@ -150,32 +172,58 @@ defmodule LoadBalancer do
       {sender,
         %ClientPutRequest{
           key: k,
-          val: v
+          val: v,
+          context: context
       }} -> IO.puts("received put req from #{sender}")
-            idx = get_node_idx(k, state.node_cnt)
-            origin_target_node = Enum.at(state.view, idx)
+            hash_key = String.to_integer(:crypto.hash(:md5, k) |> Base.encode16(), 16)
+            node_hash_val = AVLTree.get_next_larger(state.hash_avl, hash_key)
+            origin_hash_idx = Enum.find_index(state.hash_ring, fn v -> v == node_hash_val end)
+            origin_target_node = state.hash_to_node[node_hash_val]
             case elem(state.node_status[origin_target_node], 2) do
-              :alive -> send(origin_target_node, CoordinateRequest.new_put_request(sender, nil, k, v))
-              _ -> case clockwise_walk(state, idx + 1, state.node_cnt - 1, state.node_cnt) do
-                    :fail -> send(sender, ClientResponse.new_response(:fail, nil))
-                    n -> send(n, CoordinateRequest.new_put_request(sender, origin_target_node, k, v))
+              :alive -> send(origin_target_node, CoordinateRequest.new_put_request(sender, nil, k, v, context))
+              _ -> case clockwise_walk(
+                          state,
+                          Enum.slice(state.hash_ring, origin_hash_idx + state.replica_cnt .. state.node_cnt - 1)
+                          ++
+                          Enum.slice(state.hash_ring, max(0, -(state.node_cnt - origin_hash_idx - state.replica_cnt)) .. origin_hash_idx - 1)
+                        ) do
+                    :fail -> send(sender, ClientResponse.new_response(:fail, nil, nil))
+                    n -> send(n, CoordinateRequest.new_put_request(sender, origin_target_node, k, v, context))
                    end
             end
-            send(sender, {state.node_status, origin_target_node})
+            send(sender, {state.node_status, state.hash_ring, state.hash_avl})
             run_loadbalancer(state)
       {sender,
         %ClientGetRequest{
           key: k
-        }} -> idx = get_node_idx(k, state.node_cnt)
-              origin_target_node = Emun.at(state.view, idx)
+        }} -> IO.puts("received get req from #{sender}")
+              hash_key = String.to_integer(:crypto.hash(:md5, k) |> Base.encode16(), 16)
+              node_hash_val = AVLTree.get_next_larger(state.hash_avl, hash_key)
+              origin_hash_idx = Enum.find_index(state.hash_ring, node_hash_val)
+              origin_target_node = state.hash_to_node[node_hash_val]
               case elem(state.node_status[origin_target_node], 2) do
-                :alive -> send(origin_target_node, CoordinateRequest.new_get_request(sender, nil, k))
-                _ -> case clockwise_walk(state, idx + 1, state.node_cnt - 1, state.node_cnt) do
+                      :alive -> send(origin_target_node, CoordinateRequest.new_get_request(sender, nil, k))
+                      _ -> case clockwise_walk(
+                                  state,
+                                  Enum.slice(state.hash_ring, origin_hash_idx + state.replica_cnt .. state.node_cnt - 1)
+                                  ++
+                                  Enum.slice(state.hash_ring, max(0, -(state.node_cnt - origin_hash_idx - state.replica_cnt)) .. origin_hash_idx - 1)
+                                ) do
                        :fail -> send(sender, ClientResponse.new_response(:fail, nil))
-                       n -> send(n, CoordinateRequest.new_put_request(sender, origin_target_node, k))
+                       n -> send(n, CoordinateRequest.new_get_request(sender, origin_target_node, k))
                      end
               end
+              send(sender, {state.node_status, state.hash_ring, state.hash_avl})
               run_loadbalancer(state)
+       {sender,
+         %CoordinateResponse{
+           client: client,
+           succ: succ,
+           method: method,
+           key: k,
+           val: val,
+           context: context
+         }} -> send(client, ClientResponse.new_response(succ, val, context))
     end
   end
 end

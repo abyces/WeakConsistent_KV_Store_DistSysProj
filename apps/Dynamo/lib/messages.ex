@@ -1,15 +1,16 @@
 defmodule ClientPutRequest do
   alias __MODULE__
 
-  @enforce_keys [:key, :val]
+  @enforce_keys [:key, :val, :context]
   defstruct(
     key: nil,
-    val: nil
+    val: nil,
+    context: nil
   )
 
-  @spec new(non_neg_integer(), non_neg_integer()) :: %ClientPutRequest{}
-  def new(k, v) do
-    %ClientPutRequest{key: k, val: v}
+  @spec new(non_neg_integer(), non_neg_integer(), map()) :: %ClientPutRequest{}
+  def new(k, v, context) do
+    %ClientPutRequest{key: k, val: v, context: context}
   end
 
 end
@@ -32,15 +33,16 @@ end
 defmodule ClientResponse do
   alias __MODULE__
 
-  @enforce_keys [:status]
+  @enforce_keys [:succ]
   defstruct(
     succ: nil,
-    res: nil
+    res: nil,
+    context: nil
   )
 
-  @spec new_response(atom(), non_neg_integer()) :: %ClientResponse{}
-  def new_response(succ, val) do
-    %ClientResponse{succ: succ, res: val}
+  @spec new_response(atom(), non_neg_integer(), map()) :: %ClientResponse{}
+  def new_response(succ, val, context) do
+    %ClientResponse{succ: succ, res: val, context: context}
   end
 end
 
@@ -54,12 +56,13 @@ defmodule CoordinateRequest do
     method: nil,
     hint: nil,
     key: nil,
-    val: nil
+    val: nil,
+    context: nil,
   )
 
-  @spec new_put_request(atom(), atom(), non_neg_integer(), non_neg_integer()) :: %CoordinateRequest{}
-  def new_put_request(client, hint, k, v) do
-    %CoordinateRequest{client: client, method: :put, hint: hint, key: k, val: v}
+  @spec new_put_request(atom(), atom(), non_neg_integer(), non_neg_integer(), list()) :: %CoordinateRequest{}
+  def new_put_request(client, hint, k, v, context) do
+    %CoordinateRequest{client: client, method: :put, hint: hint, key: k, val: v, context: context}
   end
 
   @spec new_get_request(atom(), atom(), non_neg_integer()) :: %CoordinateRequest{}
@@ -72,22 +75,23 @@ end
 defmodule CoordinateResponse do
   alias __MODULE__
 
-  @enforce_keys [:client, :succ, :method, :vector_clock, :key]
+  @enforce_keys [:client, :succ, :method, :key]
   defstruct(
     client: nil,
     succ: nil,
     method: nil,
     key: nil,
     val: nil,
+    context: nil
   )
 
   @spec new_put_response(atom(), atom(), non_neg_integer) :: %CoordinateResponse{}
   def new_put_response(client, succ, k) do
-    %CoordinateResponse{client: client, succ: succ, method: :put, key: k, val: nil}
+    %CoordinateResponse{client: client, succ: succ, method: :put, key: k, val: nil, context: nil}
   end
-  @spec new_get_response(atom(), atom(), non_neg_integer(), non_neg_integer()) :: %CoordinateResponse{}
-  def new_get_response(client, succ, k, val) do
-    %CoordinateResponse{client: client, succ: succ, method: :get, key: k, val: val}
+  @spec new_get_response(atom(), atom(), non_neg_integer(), non_neg_integer(), map()) :: %CoordinateResponse{}
+  def new_get_response(client, succ, k, val, context) do
+    %CoordinateResponse{client: client, succ: succ, method: :get, key: k, val: val, context: context}
   end
 end
 
@@ -107,66 +111,100 @@ defmodule GossipMessage do
 end
 
 
-defmodule RelicaPutRequest do
+defmodule ReplicaPutRequest do
   alias __MODULE__
 
-  @enforce_keys [:key, :val, :vector_clock]
+  @enforce_keys [:client, :key, :context, :hint]
+  defstruct(
+    client: nil,
+    key: nil,
+    context: nil,
+    hint: nil
+  )
+
+  @spec new(atom(), any(), [tuple()], atom()) :: %ReplicaPutRequest{}
+  def new(client, k, context, hint) do
+    %ReplicaPutRequest{client: client, key: k, context: context, hint: hint}
+  end
+end
+
+defmodule ReplicaPutResponse do
+  alias __MODULE__
+
+  @enforce_keys [:key, :succ, :client]
+  defstruct(
+    client: nil,
+    key: nil,
+    succ: nil
+  )
+
+  @spec new(atom(), any(), atom()) :: %ReplicaPutResponse{}
+  def new(client, k, succ) do
+    %ReplicaPutResponse{client: client, key: k, succ: succ}
+  end
+end
+
+defmodule ReplicaGetRequest do
+  alias __MODULE__
+
+  @enforce_keys [:client, :key, :hint]
+  defstruct(
+    client: nil,
+    key: nil,
+    hint: nil
+  )
+
+  @spec new(atom(), any(), atom()) :: %ReplicaGetRequest{}
+  def new(client, k, hint) do
+    %ReplicaGetRequest{client: client, key: k, hint: hint}
+  end
+end
+
+defmodule ReplicaGetResponse do
+  alias __MODULE__
+
+  @enforce_keys [:client, :key, :context, :succ]
+  defstruct(
+    client: nil,
+    key: nil,
+    context: nil,
+    succ: nil,
+  )
+
+  @spec new(atom(), any(), atom(), [tuple()]) :: %ReplicaGetResponse{}
+  def new(client, k, succ, context) do
+    %ReplicaGetResponse{client: client, key: k, context: context, succ: succ}
+  end
+end
+
+defmodule HintedDataRequest do
+  alias __MODULE__
+
+  @enforce_keys [:key, :val, :context]
   defstruct(
     key: nil,
     val: nil,
-    vector_clock: nil,
+    context: nil
   )
 
-  @spec new(map(), non_neg_integer(), non_neg_integer()) :: %RelicaPutRequest{}
-  def new(k, v, vector_clock) do
-    %RelicaPutRequest{key: k, val: v, vector_clock: vector_clock}
+  @spec new(non_neg_integer(), non_neg_integer(), map()) :: %HintedDataRequest{}
+  def new(k, v, context) do
+    %HintedDataRequest{key: k, val: v, context: context}
   end
+
 end
 
-defmodule RelicaPutResponse do
+defmodule HintedDataResponse do
   alias __MODULE__
 
-  @enforce_keys [:key, :succ, :vector_clock]
+  @enforce_keys [:key, :succ]
   defstruct(
     key: nil,
-    succ: nil,
-    vector_clock: nil
+    succ: nil
   )
 
-  @spec new(map(), non_neg_integer(), non_neg_integer()) :: %RelicaPutResponset{}
-  def new(k, succ, vector_clock) do
-    %RelicaPutResponset{key: k, succ: succ, vector_clock: vector_clock}
-  end
-end
-
-defmodule RelicaGetRequest do
-  alias __MODULE__
-
-  @enforce_keys [:key, :vector_clock]
-  defstruct(
-    key: nil,
-    vector_clock: nil,
-  )
-
-  @spec new(map(), non_neg_integer(), non_neg_integer()) :: %RelicaPutReponse{}
-  def new(k, v, vector_clock) do
-    %RelicaPutReponse{key: k, vector_clock: vector_clock}
-  end
-end
-
-defmodule RelicaGetResponse do
-  alias __MODULE__
-
-  @enforce_keys [:key, :val, :succ, :vector_clock]
-  defstruct(
-    key: nil,
-    val: nil,
-    succ: nil,
-    vector_clock: nil
-  )
-
-  @spec new(map(), non_neg_integer(), non_neg_integer()) :: %RelicaGetResponset{}
-  def new(k, v, succ, vector_clock) do
-    %RelicaGetResponset{key: k, val: v, succ: succ, vector_clock: vector_clock}
+  @spec new(any(), atom()) :: %HintedDataResponse{}
+  def new(key, succ) do
+    %HintedDataResponse{key: key, succ: succ}
   end
 end
