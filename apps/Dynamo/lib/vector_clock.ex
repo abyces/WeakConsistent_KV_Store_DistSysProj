@@ -1,11 +1,11 @@
 defmodule VectorClock do
-
   @before :before
   @hafter :after
   @concurrent :concurrent
 
   # Combine a single component in a vector clock.
-  @spec combine_component(non_neg_integer(), non_neg_integer()) :: non_neg_integer()
+  @spec combine_component(non_neg_integer(), non_neg_integer()) ::
+          non_neg_integer()
   defp combine_component(current, received) do
     if current > received do
       current
@@ -33,7 +33,8 @@ defmodule VectorClock do
     Map.merge(v1, Enum.into(v1_add, %{}))
   end
 
-  @spec compare_component(non_neg_integer(),non_neg_integer()) :: :before | :after | :concurrent
+  @spec compare_component(non_neg_integer(), non_neg_integer()) ::
+          :before | :after | :concurrent
   defp compare_component(c1, c2) do
     if c1 == c2 do
       :concurrent
@@ -51,14 +52,18 @@ defmodule VectorClock do
   def compare_vectors(v1, v2) do
     v1 = make_vectors_equal_length(v1, v2)
     v2 = make_vectors_equal_length(v2, v1)
-    compare_result = Map.values(Map.merge(v1, v2, fn _k, c1, c2 -> compare_component(c1, c2) end))
+
+    compare_result =
+      Map.values(
+        Map.merge(v1, v2, fn _k, c1, c2 -> compare_component(c1, c2) end)
+      )
 
     if Enum.all?(compare_result, fn x -> x == @before or x == @concurrent end) and
-       Enum.any?(compare_result, fn x -> x == @before end) do
+         Enum.any?(compare_result, fn x -> x == @before end) do
       :before
     else
       if Enum.all?(compare_result, fn x -> x == @hafter or x == @concurrent end) and
-         Enum.any?(compare_result, fn x -> x == @hafter end) do
+           Enum.any?(compare_result, fn x -> x == @hafter end) do
         :after
       else
         :concurrent

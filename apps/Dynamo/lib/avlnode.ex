@@ -2,14 +2,14 @@ defmodule AVLTree.Node do
   @moduledoc false
 
   @compile {:inline,
-    value: 1,
-    height: 1,
-    fix_height: 1,
-    rotate_left: 1,
-    rotate_right: 1,
-    big_rotate_left: 1,
-    big_rotate_right: 1,
-    balance: 1}
+            value: 1,
+            height: 1,
+            fix_height: 1,
+            rotate_left: 1,
+            rotate_right: 1,
+            big_rotate_left: 1,
+            big_rotate_right: 1,
+            balance: 1}
 
   def put(nil, value, _less), do: {value, 1, nil, nil}
 
@@ -151,8 +151,12 @@ defmodule AVLTree.Node do
 
   def inorder_traverse(root) do
     case root do
-      nil -> []
-      node -> inorder_traverse(elem(root, 2)) ++ [elem(root, 0)] ++ inorder_traverse(elem(root, 3))
+      nil ->
+        []
+
+      node ->
+        inorder_traverse(elem(root, 2)) ++
+          [elem(root, 0)] ++ inorder_traverse(elem(root, 3))
     end
   end
 
@@ -231,7 +235,9 @@ defmodule AVLTree.Node do
 
   def iter_lower(root), do: iter_lower_impl(root, [])
 
-  def iter_lower_impl({_v, _h, l, _r} = a, iter), do: iter_lower_impl(l, [a | iter])
+  def iter_lower_impl({_v, _h, l, _r} = a, iter),
+    do: iter_lower_impl(l, [a | iter])
+
   def iter_lower_impl(nil, iter), do: iter
 
   def next([{_v, _h, _, r} = n | tail]), do: {n, iter_lower_impl(r, tail)}

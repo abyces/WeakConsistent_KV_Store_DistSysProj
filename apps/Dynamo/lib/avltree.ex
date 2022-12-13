@@ -332,7 +332,8 @@ defmodule AVLTree do
   ```
   """
   @spec member?(t(), term()) :: boolean()
-  def member?(%__MODULE__{root: root, less: less}, value), do: Node.member?(root, value, less)
+  def member?(%__MODULE__{root: root, less: less}, value),
+    do: Node.member?(root, value, less)
 
   @doc """
   Puts the given `value` in the tree.
@@ -383,7 +384,10 @@ defmodule AVLTree do
   ```
   """
   @spec put_lower(t(), value()) :: t()
-  def put_lower(%__MODULE__{root: root, size: size, less: less} = avl_tree, value) do
+  def put_lower(
+        %__MODULE__{root: root, size: size, less: less} = avl_tree,
+        value
+      ) do
     %{avl_tree | root: Node.put_lower(root, value, less), size: size + 1}
   end
 
@@ -410,7 +414,10 @@ defmodule AVLTree do
   ```
   """
   @spec put_upper(t(), value()) :: t()
-  def put_upper(%__MODULE__{root: root, size: size, less: less} = avl_tree, value) do
+  def put_upper(
+        %__MODULE__{root: root, size: size, less: less} = avl_tree,
+        value
+      ) do
     %{avl_tree | root: Node.put_upper(root, value, less), size: size + 1}
   end
 
@@ -453,7 +460,10 @@ defmodule AVLTree do
   ```
   """
   @spec delete_lower(t(), value()) :: {:ok, t()} | :error
-  def delete_lower(%__MODULE__{root: root, size: size, less: less} = avl_tree, value) do
+  def delete_lower(
+        %__MODULE__{root: root, size: size, less: less} = avl_tree,
+        value
+      ) do
     case Node.delete_lower(root, value, less) do
       {true, a} -> %{avl_tree | root: a, size: size - 1}
       {false, _} -> avl_tree
@@ -475,7 +485,10 @@ defmodule AVLTree do
   ```
   """
   @spec delete_upper(t(), value()) :: {:ok, t()} | :error
-  def delete_upper(%__MODULE__{root: root, size: size, less: less} = avl_tree, value) do
+  def delete_upper(
+        %__MODULE__{root: root, size: size, less: less} = avl_tree,
+        value
+      ) do
     case Node.delete_upper(root, value, less) do
       {true, a} -> %{avl_tree | root: a, size: size - 1}
       {false, _} -> avl_tree

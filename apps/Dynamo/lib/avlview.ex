@@ -26,15 +26,22 @@ defmodule AVLTree.Node.View do
     width = left_width + right_width + 1
 
     left_connector =
-      String.pad_leading("┌" <> String.duplicate("─", l_width - l_head - 1), left_width)
+      String.pad_leading(
+        "┌" <> String.duplicate("─", l_width - l_head - 1),
+        left_width
+      )
 
-    right_connector = String.pad_trailing(String.duplicate("─", r_head) <> "┐", right_width)
+    right_connector =
+      String.pad_trailing(String.duplicate("─", r_head) <> "┐", right_width)
 
     {
       width,
       left_width,
       [
-        String.pad_trailing(String.pad_leading(v_str, left_width + v_right_width + 1), width),
+        String.pad_trailing(
+          String.pad_leading(v_str, left_width + v_right_width + 1),
+          width
+        ),
         left_connector <> "┴" <> right_connector
         | merge(left_width, right_width, l_canvas, r_canvas)
       ]
