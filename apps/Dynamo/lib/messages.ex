@@ -53,6 +53,7 @@ defmodule CoordinateRequest do
   @enforce_keys [:client, :method, :hint, :key]
   defstruct(
     client: nil,
+    key_range: nil,
     method: nil,
     hint: nil,
     key: nil,
@@ -65,23 +66,25 @@ defmodule CoordinateRequest do
           atom(),
           non_neg_integer(),
           non_neg_integer(),
-          map()
+          map(),
+          any()
         ) :: %CoordinateRequest{}
-  def new_put_request(client, hint, k, v, vector_clock) do
+  def new_put_request(client, hint, k, v, vector_clock, key_range) do
     %CoordinateRequest{
       client: client,
       method: :put,
       hint: hint,
       key: k,
       val: v,
-      vector_clock: vector_clock
+      vector_clock: vector_clock,
+      key_range: key_range
     }
   end
 
   @spec new_get_request(atom(), atom(), any()) ::
           %CoordinateRequest{}
   def new_get_request(client, hint, k) do
-    %CoordinateRequest{client: client, method: :get, hint: hint, key: k}
+    %CoordinateRequest{client: client, method: :get, hint: hint, key: k, key_range: nil}
   end
 end
 
@@ -145,21 +148,23 @@ end
 defmodule ReplicaPutRequest do
   alias __MODULE__
 
-  @enforce_keys [:client, :key, :context, :hint]
+  @enforce_keys [:client, :key, :context, :hint, :key_range]
   defstruct(
     client: nil,
     key: nil,
     context: nil,
-    hint: nil
+    hint: nil,
+  key_range: nil
   )
 
-  @spec new(atom(), any(), [tuple()], atom()) :: %ReplicaPutRequest{}
-  def new(client, k, context, hint) do
+  @spec new(atom(), any(), [tuple()], atom(), any()) :: %ReplicaPutRequest{}
+  def new(client, k, context, hint, key_range) do
     %ReplicaPutRequest{
       client: client,
       key: k,
       context: context,
-      hint: hint
+      hint: hint,
+      key_range: key_range
     }
   end
 end
@@ -184,36 +189,34 @@ end
 defmodule ReplicaGetRequest do
   alias __MODULE__
 
-  @enforce_keys [:client, :key, :hint, :source]
+  @enforce_keys [:client, :key, :hint]
   defstruct(
     client: nil,
     key: nil,
-    hint: nil,
-    source: nil,
+    hint: nil
   )
 
-  @spec new(atom(), any(), atom(), atom()) :: %ReplicaGetRequest{}
-  def new(client, k, hint, source) do
-    %ReplicaGetRequest{client: client, key: k, hint: hint, source: source}
+  @spec new(atom(), any(), atom()) :: %ReplicaGetRequest{}
+  def new(client, k, hint) do
+    %ReplicaGetRequest{client: client, key: k, hint: hint}
   end
 end
 
 defmodule ReplicaGetResponse do
   alias __MODULE__
 
-  @enforce_keys [:client, :key, :context, :succ, :hint, :source]
+  @enforce_keys [:client, :key, :context, :succ, :hint]
   defstruct(
     client: nil,
     key: nil,
     context: nil,
     succ: nil,
     hint: nil,
-    source: nil
   )
 
-  @spec new(atom(), any(), [tuple()], atom(), atom(), atom()) :: %ReplicaGetResponse{}
-  def new(client, k, context, succ, hint, source) do
-    %ReplicaGetResponse{client: client, key: k, context: context, succ: succ, hint: hint, source: source}
+  @spec new(atom(), any(), [tuple()], atom(), atom()) :: %ReplicaGetResponse{}
+  def new(client, k, context, succ, hint) do
+    %ReplicaGetResponse{client: client, key: k, context: context, succ: succ, hint: hint}
   end
 end
 
@@ -244,5 +247,34 @@ defmodule HintedDataResponse do
   @spec new(any(), atom()) :: %HintedDataResponse{}
   def new(key, succ) do
     %HintedDataResponse{key: key, succ: succ}
+  end
+end
+
+defmodule ReplicaSyncRequest do
+  alias __MODULE__
+
+  @enforce_keys [:key_range]
+  defstruct(
+    key_range: nil
+  )
+
+  @spec new(any()) :: %ReplicaSyncRequest{}
+  def new(key_range) do
+    %ReplicaSyncRequest{key_range: key_range}
+  end
+end
+
+defmodule ReplicaSyncResponse do
+  alias __MODULE__
+
+  @enforce_keys [:key_range, :merkle_tree]
+  defstruct(
+    key_range: nil,
+    merkle_tree: nil
+  )
+
+  @spec new(any(), %MerkleTree{}) :: %ReplicaSyncResponse{}
+  def new(key_range, merkle_tree) do
+    %ReplicaSyncResponse{key_range: key_range, merkle_tree: merkle_tree}
   end
 end

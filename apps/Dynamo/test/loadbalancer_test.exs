@@ -58,7 +58,7 @@
 #        IO.puts("here: " + m)
 #    end
 #
-#    #  test "tree" do
+#    #  test "test hash ring: AVL tree" do
 #    #    tree = AVLTree.new()
 #    #    tree = AVLTree.put(tree, 1)
 #    #    tree = AVLTree.put(tree, 2)

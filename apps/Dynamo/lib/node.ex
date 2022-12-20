@@ -28,9 +28,11 @@ defmodule DynamoNode do
     gossip_table: nil,
 
     data: nil,                        # #{key => [{v, context}, ...]}
-    hinted_data: nil,                 # %{origin_target => %{key => [{v, context}, ...]}}
+    hinted_data: nil,                 # %{key => [{v, context}, ...]}
     response_cnt: nil,                # %{timer_msg => {cnt, client, method, key, timer}}
     client_request_identifier: nil,   # %{client => atom()}
+    hinted_nodes: nil,                # %{node => MapSet<[keys]>}
+    key_range: nil,                   # %{node_hash => MapSet<[keys]>, node_hash => [keys}
 
     heartbeat_timeout: nil,
     heartbeat_timer: nil,
@@ -93,6 +95,8 @@ defmodule DynamoNode do
       data: %{},
       hinted_data: %{},
       response_cnt: %{},
+      hinted_nodes: %{},
+      key_range: %{},
       client_request_identifier: %{},
       heartbeat_timeout: heartbeat_timeout,
       heartbeat_timer: nil,
@@ -122,7 +126,11 @@ defmodule DynamoNode do
   # This function broadcast the message to all its replica node(preference_list)
   @spec broadcast_replica(%DynamoNode{}, any()) :: [boolean()]
   defp broadcast_replica(state, message) do
-    Enum.each(state.preference_list, fn node -> send(node, message) end)
+    Enum.each(state.preference_list, fn node ->
+      if elem(state.gossip_table[node], 2) == :alive do
+        send(node, message)
+      end
+    end)
   end
 
   # This function reset the heartbeat timer
@@ -172,28 +180,32 @@ defmodule DynamoNode do
   end
 
   @spec put_hinted_data(%DynamoNode{}, atom(), non_neg_integer(), any(), list()) :: %DynamoNode{}
-  defp put_hinted_data(state, original_target, key, val, context) do
+  defp put_hinted_data(state, hint, key, val, context) do
     me = whoami()
     processed_context = Context.increment_vector_clock(context)
-    case Map.has_key?(state.hinted_data, original_target) do
-      false ->
-        _data = [{val, processed_context}]
-        %{state | hinted_data: Map.put(state.hinted_data, original_target, %{key => _data})}
-
-      true ->
-        local_storage = Map.get(state.hinted_data, original_target)
-        new_storage =
-          case Map.has_key?(local_storage, key) do
-            false ->
-              Map.put(local_storage, key, [{val, processed_context}])
-
-            true ->
-              new_data_list = Context.merge_context(Map.get(local_storage, key), [{val, processed_context}])
-              Map.put(local_storage, key, new_data_list)
-          end
-        IO.puts(new_storage)
-        %{state | hinted_data: Map.put(state.hinted_data, original_target, new_storage)}
+    k_list = case Map.has_key?(state.hinted_nodes, hint) do
+      true -> MapSet.put(state.hinted_nodes[hint], key)
+      false -> MapSet.new([key])
     end
+    state = %{state | hinted_nodes: Map.put(state.hinted_nodes, hint, k_list)}
+    new_hinted_data = case Map.has_key?(state.hinted_data, key) do
+      false -> Map.put(state.hinted_data, key, [{val, processed_context}])
+      true -> Map.put(state.hinted_data, key, Context.merge_context(state.hinted_data[key], [{val, processed_context}]))
+    end
+    %{state | hinted_data: new_hinted_data}
+  end
+
+  @spec add_key_to_key_range(%DynamoNode{}, atom(), any()) :: %DynamoNode{}
+  defp add_key_to_key_range(state, node_hash, key) do
+    state = case Map.has_key?(state.key_range, node_hash) do
+      true -> %{state | key_range: Map.put(state.key_range, node_hash, MapSet.put(state.key_range[node_hash], key))}
+      false -> %{state | key_range: Map.put(state.key_range, node_hash, MapSet.new([key]))}
+    end
+  end
+
+  @spec find_key_range_by_key(%DynamoNode{}, any()) :: any()
+  defp find_key_range_by_key(state, key) do
+    key_range = AVLTree.get_next_larger(state.hash_avl, String.to_integer(:crypto.hash(:md5, key) |> Base.encode16(), 16))
   end
 
   @spec get_data(%DynamoNode{}, non_neg_integer()) :: {any(), map()}
@@ -203,16 +215,13 @@ defmodule DynamoNode do
 
   @spec get_hinted_data(%DynamoNode{}, atom(), non_neg_integer()) :: any()
   defp get_hinted_data(state, original_target, key) do
-    case Map.has_key?(state.hinted_data, original_target) do
-      true -> Map.get(state.hinted_data[original_target], key)
-      false -> nil
-    end
+    Map.get(state.hinted_data, key)
   end
 
-  @spec send_replica_to_nodes(%DynamoNode{}, atom(), non_neg_integer(), any()) :: atom()
-  def send_replica_to_nodes(state, client, key, hint) do
+  @spec send_replica_to_nodes(%DynamoNode{}, atom(), non_neg_integer(), any(), any()) :: atom()
+  def send_replica_to_nodes(state, client, key, hint, key_range) do
     data = state.data[key]
-    message = ReplicaPutRequest.new(client, key, data, hint)
+    message = ReplicaPutRequest.new(client, key, data, hint, key_range)
     broadcast_replica(state, message)
   end
 
@@ -228,7 +237,7 @@ defmodule DynamoNode do
       )
            hint_idx = Enum.find_index(state.hash_ring, fn v -> v == hint_hash end)
            data = state.hinted_data[h][key]
-           IO.puts(hint_idx)
+
            hint_preference_list =
              Enum.slice(
                state.hash_ring ++ state.hash_ring,
@@ -237,11 +246,10 @@ defmodule DynamoNode do
            me = whoami()
            Enum.each(hint_preference_list, fn v ->
              if elem(Map.get(state.gossip_table, v), 2) == :alive && v != me do
-               send(v, ReplicaGetRequest.new(client, key, nil, h))
+               send(v, ReplicaGetRequest.new(client, key, nil))
              end
            end)
     end
-
   end
 
   @spec send_hinted_replica_to_nodes(%DynamoNode{}, atom(), non_neg_integer(), any()) :: atom()
@@ -251,7 +259,7 @@ defmodule DynamoNode do
       16
     )
     hint_idx = Enum.find_index(state.hash_ring, fn v -> v == hint_hash end)
-    data = state.hinted_data[hint][key]
+    data = state.hinted_data[key]
 
     hint_preference_list =
       Enum.slice(
@@ -261,7 +269,7 @@ defmodule DynamoNode do
 
     Enum.each(List.zip([state.preference_list, hint_preference_list]), fn {dst, hint_src} ->
       if elem(Map.get(state.gossip_table, dst), 2) == :alive do
-        send(dst, ReplicaPutRequest.new(client, key, data, hint_src))
+        send(dst, ReplicaPutRequest.new(client, key, data, hint_src, nil))
       end
     end)
   end
@@ -269,14 +277,57 @@ defmodule DynamoNode do
   # This funtions check all target_node in hinted data with gossip table
   # and send hinted data to target_node if gossip_table[target] is :alive.
   # state is unchanged, hinted_data is updated when receiving responses
-  @spec send_hinted_data_ref_gossip_table(map(), atom(), map()) :: nil
-  defp send_hinted_data_ref_gossip_table(hinted_data, target_node, gossip_table) do
-    if elem(Map.get(gossip_table, target_node), 2)  == :alive do
-      Enum.each(hinted_data[target_node], fn {k, data_list} ->
-        send(target_node, HintedDataRequest.new(k, data_list))
+  @spec send_hinted_data_ref_gossip_table(%DynamoNode{}, atom()) :: %DynamoNode{}
+  defp send_hinted_data_ref_gossip_table(state, target_node) do
+#    IO.puts("#{whoami()}: send_hinted_data_ref_gossip to #{target_node}}")
+    if elem(Map.get(state.gossip_table, target_node), 2)  == :alive do
+      Enum.each(state.hinted_nodes[target_node], fn key ->
+        send(target_node, HintedDataRequest.new(key, state.hinted_data[key]))
       end)
     end
+    state
   end
+
+  @spec merkle_tree_hash_func(any()) :: (any() -> any())
+  def merkle_tree_hash_func(x) do
+    :crypto.hash(:md5, x) |> Base.encode16()
+  end
+
+  @spec data_sync_helper(%DynamoNode{}, [any()], map(), any()) :: %DynamoNode{}
+  def data_sync_helper(state, keys, recv_blcoks, key_range) do
+    case keys do
+      [] -> state
+      [key | tl] -> state = %{state | data: Map.put(state.data, key, Context.merge_context(state.data[key], recv_blcoks[key]))}
+                    state = %{state | key_range: Map.put(state.key_range, key_range, MapSet.put(state.key_range[key_range], key))}
+                    data_sync_helper(state, tl, recv_blcoks, key_range)
+    end
+  end
+
+  @spec merkle_tree_data_sync(%DynamoNode{}, any(), %MerkleTree.Node{}, %MerkleTree.Node{}, map()) :: %DynamoNode{}
+  def merkle_tree_data_sync(state, key_range, local_merkle_tree, recv_merkle_tree, recv_blocks) do
+    case local_merkle_tree do
+      [] -> case recv_merkle_tree do
+              [] -> state
+              node -> data_sync_helper(state, node.keys, recv_blocks, key_range)
+            end
+      node -> case recv_merkle_tree do
+                [] -> state
+                node1 -> if node.value == node1.value do
+                            state
+                         else
+                            if node.children == [] || node1.children == [] do
+                              data_sync_helper(state, node1.keys, recv_blocks, key_range)
+                            else
+                              [local_child1, local_child2] = node.children
+                              [recv_child1, recv_child2] = node1.children
+                              state = merkle_tree_data_sync(state, key_range, local_child1, recv_child1, recv_blocks)
+                              merkle_tree_data_sync(state, key_range, local_child2, recv_child2, recv_blocks)
+                            end
+                         end
+              end
+    end
+  end
+
 
   @doc """
   This function initialize a dynamo node
@@ -361,30 +412,19 @@ defmodule DynamoNode do
 
       {sender, %GossipMessage{gossip_table: rev_gossip_table}} ->
         case rev_gossip_table do
-          nil ->
-            IO.puts("#{whoami()} received heartbeat from #{sender}")
-            state = Gossip.gossip_table_update_heartbeat(state, sender)
-            run_node(state)
+          nil -> # IO.puts("#{whoami()} received heartbeat from #{sender}")
+                 state = Gossip.gossip_table_update_heartbeat(state, sender)
+                 run_node(state)
 
-          _ ->
-            IO.puts("#{whoami()} received gossip table from #{sender}")
-            state = Gossip.gossip_table_set_alive_by_id(state, sender)
-            state = Gossip.gossip_table_merge(state, rev_gossip_table)
+          _ ->  # IO.puts("#{whoami()} received gossip table from #{sender}")
+               state = Gossip.gossip_table_set_alive_by_id(state, sender)
+               state = Gossip.gossip_table_merge(state, rev_gossip_table)
+               state = case Map.has_key?(state.hinted_nodes, sender) do
+                 true -> send_hinted_data_ref_gossip_table(state, sender)
+                 false -> state
+               end
 
-#            if state.hinted_data != nil and state.hinted_data != %{} do
-#              IO.puts(state.hinted_data)
-#            end
-
-            if Map.has_key?(state.hinted_data, sender) do
-              send_hinted_data_ref_gossip_table(
-                state.hinted_data,
-                sender,
-                state.gossip_table
-              )
-            end
-
-
-            run_node(state)
+               run_node(state)
         end
 
       {sender,
@@ -394,9 +434,10 @@ defmodule DynamoNode do
          hint: hint,
          key: key,
          val: val,
-         vector_clock: vector_clock
+         vector_clock: vector_clock,
+         key_range: key_range
        }} ->
-        IO.puts("#{whoami()} received coordinate #{method} request from client #{client} with hint #{hint}")
+#        IO.puts("#{whoami()} received coordinate #{method} request from client #{client} with hint #{hint} key_range #{key_range}}")
         case hint do
           nil ->
             case method do
@@ -409,7 +450,8 @@ defmodule DynamoNode do
                               send(:loadbalancer, CoordinateResponse.new_put_response(client, :no_context, key, vals, context_summary))
                               run_node(state)
                       false -> state = put_key_from_client(state, key, val, %{})
-                               send_replica_to_nodes(state, client, key, hint)
+                               state = add_key_to_key_range(state, key_range, key)
+                               send_replica_to_nodes(state, client, key, hint, key_range)
                                {vals, context_summary} = Context.get_context_summary(state, key)
                                state = case state.w_cnt do
                                  1 -> send(:loadbalancer, CoordinateResponse.new_put_response(client, :ok, key, vals, context_summary))
@@ -425,7 +467,8 @@ defmodule DynamoNode do
                     state = put_key_from_client(state, key, val, vector_clock)
                     case length(Map.get(state.data, key)) do
                       1 -> {vals, context_summary} = Context.get_context_summary(state, key)
-                           send_replica_to_nodes(state, client, key, hint)
+                           state = add_key_to_key_range(state, key_range, key)
+                           send_replica_to_nodes(state, client, key, hint, key_range)
                            state = case state.w_cnt do
                              1 -> send(:loadbalancer, CoordinateResponse.new_put_response(client, :ok, key, vals, context_summary))
                                   state
@@ -448,19 +491,19 @@ defmodule DynamoNode do
                       nil -> send(:loadbalancer, CoordinateResponse.new_get_response(client, :no_such_key, key, nil, nil))
                              run_node(state)
 
-                  context ->
-                    state = case state.r_cnt do
-                      1 -> {vals, context_summary} = Context.get_context_summary(state, key)
-                            IO.puts("get response")
-                           send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, vals, context_summary))
-                           state
-                      _ -> IO.puts("get response 3")
-                           get_replica_from_nodes(state, client, key, hint)
-                           timer_msg = LoadBalancer.get_hash_timer_msg(client, method, key)
-                           state = %{state | client_request_identifier: Map.put(state.client_request_identifier, client, timer_msg)}
-                           %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {1, client, :get, key, timer(state.r_timeout, timer_msg)})} #TODO timer
-                    end
-                    run_node(state)
+                      context ->
+                        state = case state.r_cnt do
+                          1 -> {vals, context_summary} = Context.get_context_summary(state, key)
+                                #IO.puts("get response")
+                               send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, vals, context_summary))
+                               state
+                          _ -> #IO.puts("get response 3")
+                               get_replica_from_nodes(state, client, key, hint)
+                               timer_msg = LoadBalancer.get_hash_timer_msg(client, method, key)
+                               state = %{state | client_request_identifier: Map.put(state.client_request_identifier, client, timer_msg)}
+                               %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {1, client, :get, key, timer(state.r_timeout, timer_msg)})} #TODO timer
+                        end
+                        run_node(state)
                 end
             end
 
@@ -474,25 +517,24 @@ defmodule DynamoNode do
                       true -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key)
                               send(:loadbalancer, CoordinateResponse.new_put_response(client, :no_context, key, vals, context_summary))
                               run_node(state)
-                      false ->
-                        state = put_hinted_data(state, origin_target, key, val, %{})
-                        send_hinted_replica_to_nodes(state, client, key, hint)
+                      false -> state = put_hinted_data(state, origin_target, key, val, %{})
+                               send_hinted_replica_to_nodes(state, client, key, hint)
 
-                        state = case state.w_cnt do
-                          1 -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key, origin_target)
-                               send(:loadbalancer, CoordinateResponse.new_put_response(client, :ok, key, vals, context_summary))
-                               state
-                          _ -> timer_msg = LoadBalancer.get_hash_timer_msg(client, method, key)
-                               state = %{state | client_request_identifier: Map.put(state.client_request_identifier, client, timer_msg)}
-                               state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {1, client, :put, key, timer(state.w_timeout, timer_msg)})} #TODO timer
-                        end
-                        run_node(state)
+                               state = case state.w_cnt do
+                                 1 -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key)
+                                       send(:loadbalancer, CoordinateResponse.new_put_response(client, :ok, key, vals, context_summary))
+                                       state
+                                 _ -> timer_msg = LoadBalancer.get_hash_timer_msg(client, method, key)
+                                       state = %{state | client_request_identifier: Map.put(state.client_request_identifier, client, timer_msg)}
+                                       state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {1, client, :put, key, timer(state.w_timeout, timer_msg)})} #TODO timer
+                               end
+                               run_node(state)
                     end
 
                   _ ->
                     state = put_hinted_data(state, origin_target, key, val, vector_clock)
-                    case length(Map.get(state.hinted_data[origin_target], key)) do
-                      1 -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key, origin_target)
+                    case length(Map.get(state.hinted_data, key)) do
+                      1 -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key)
                            send_hinted_replica_to_nodes(state, client, key, hint)
                            state = case state.w_cnt do
                              1 -> send(:loadbalancer, CoordinateResponse.new_put_response(client, :ok, key, vals, context_summary))
@@ -502,7 +544,7 @@ defmodule DynamoNode do
                                   state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {1, client, :put, key, timer(state.w_timeout, timer_msg)})} #TODO timer
                            end
                            run_node(state)
-                      _ -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key, origin_target)
+                      _ -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key)
                            send(:loadbalancer, CoordinateResponse.new_put_response(client, :conflict, key, vals, context_summary))
                            run_node(state)
                     end
@@ -513,30 +555,20 @@ defmodule DynamoNode do
                   true -> get_data(state, key)
                   false -> get_hinted_data(state, origin_target, key)
                 end
-#                local_data = get_data(state, key)
-#                local_hinted_data = get_hinted_data(state, origin_target, key)
-#                r_data = case local_data do
-#                  nil -> local_hinted_data
-#                  _ -> case local_hinted_data do
-#                        nil -> local_data
-#                        _ -> Context.merge_context(local_data, local_hinted_data)
-#                       end
-#                end
 
                 case r_data do
                   nil -> send(:loadbalancer, CoordinateResponse.new_get_response(client, :no_such_key, key, nil, nil))
                          run_node(state)
-                  context ->
-                       state = case state.r_cnt do
-                         1 -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key, origin_target)
-                              send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, vals, context_summary))
-                              state
-                         _ -> get_replica_from_nodes(state, client, key, hint)
-                              timer_msg = LoadBalancer.get_hash_timer_msg(client, method, key)
-                              state = %{state | client_request_identifier: Map.put(state.client_request_identifier, client, timer_msg)}
-                              %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {1, client, :get, key, timer(state.r_timeout, timer_msg)})} #TODO timer
-                       end
-                       run_node(state)
+                  context -> state = case state.r_cnt do
+                               1 -> {vals, context_summary} = Context.get_context_summary_hinted_data(state, key)
+                                    send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, vals, context_summary))
+                                    state
+                               _ -> get_replica_from_nodes(state, client, key, hint)
+                                    timer_msg = LoadBalancer.get_hash_timer_msg(client, method, key)
+                                    state = %{state | client_request_identifier: Map.put(state.client_request_identifier, client, timer_msg)}
+                                    %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {1, client, :get, key, timer(state.r_timeout, timer_msg)})} #TODO timer
+                             end
+                             run_node(state)
                 end
 
                 run_node(state)
@@ -548,23 +580,23 @@ defmodule DynamoNode do
          client: client,
          key: k,
          context: context,
-         hint: hint
+         hint: hint,
+         key_range: key_range
        }} ->
-        IO.puts("#{whoami()} received replica put request from #{sender} with hint #{hint} with")
+#        IO.puts("#{whoami()} received replica put request from #{sender} with hint #{hint}")
         case hint do
           nil ->
             state = %{state | data: Map.put(state.data, k, Context.merge_context(state.data[k], context))}
+            state = add_key_to_key_range(state, key_range, k)
             send(sender, ReplicaPutResponse.new(client, k, :ok, hint))
             run_node(state)
 
-          h -> state = case Map.has_key?(state.hinted_data, h) do
-                true -> state
-                false -> %{state | hinted_data: Map.put(state.hinted_data, h, %{})}
+          h -> state = case Map.has_key?(state.hinted_nodes, h) do
+                 true -> %{state | hinted_nodes: Map.put(state.hinted_nodes, h, MapSet.put(state.hinted_nodes[h], k))}
+                 false -> %{state | hinted_nodes: Map.put(state.hinted_nodes, h, MapSet.new([k]))}
                end
-               state = case Map.has_key?(state.hinted_data[h], k) do
-                         true -> %{state | hinted_data: Map.put(state.hinted_data, h, Map.put(state.hinted_data[h], k, Context.merge_context(Map.get(state.hinted_data[h], k), context)))}
-                         false -> %{state | hinted_data: Map.put(state.hinted_data, h, Map.put(state.hinted_data[h], k, Context.merge_context(nil, context)))}
-                       end
+
+               state = %{state | hinted_data: Map.put(state.hinted_data, k, Context.merge_context(state.hinted_data[k], context))}
                send(sender, ReplicaPutResponse.new(client, k, :ok, hint))
                run_node(state)
         end
@@ -573,10 +605,9 @@ defmodule DynamoNode do
        %ReplicaGetRequest{
          client: client,
          key: key,
-         hint: hint,
-         source: source
+         hint: hint
        }} ->
-        IO.puts("#{whoami()} received replica get request from #{sender} with hint #{hint}")
+#        IO.puts("#{whoami()} received replica get request from #{sender} with hint #{hint}")
         case hint do
           nil ->
             case Map.has_key?(state.data, key) do
@@ -589,17 +620,9 @@ defmodule DynamoNode do
             run_node(state)
 
           h ->
-            case Map.has_key?(state.data, key) do
-              true -> send(sender, ReplicaGetResponse.new(client, key, Map.get(state.data, key), :ok, hint))
-              false -> case Map.has_key?(state.hinted_data, h) do
-                        true ->
-                          case Map.has_key?(state.hinted_data[h], key) do
-                            true -> send(sender, ReplicaGetResponse.new(client, key, Map.get(state.hinted_data[h], key), :ok, hint))
-                            false -> send(sender, ReplicaGetResponse.new(client, key, nil, :fail, hint))
-                          end
-
-                        false -> send(sender, ReplicaGetResponse.new(client, key, nil, :fail, hint))
-                      end
+            case Map.has_key?(state.hinted_data, key) do
+              true -> send(sender, ReplicaGetResponse.new(client, key, Map.get(state.hinted_data, key), :ok, h))
+              false -> send(sender, ReplicaGetResponse.new(client, key, nil, :fail, hint))
             end
             run_node(state)
         end
@@ -612,24 +635,38 @@ defmodule DynamoNode do
          succ: succ,
          hint: hint
        }} ->
-        IO.puts("#{whoami()} received replica get response from #{sender} with hint #{hint}")
+#        IO.puts("#{whoami()} received replica get response from #{sender} with hint #{hint}")
+#        if Map.has_key?(state.client_request_identifier, client) do
+#          IO.puts("#{whoami()} has client in state.client_request_identifier ")
+#        end
         case hint do
           nil -> case Map.has_key?(state.client_request_identifier, client) do
                    true ->
                      timer_msg = state.client_request_identifier[client]
-                     {cnt, _, _, _, t} = state.response_cnt[timer_msg]
-                     state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :get, key, t})}
-                     merged_context = Context.merge_context(state.data[key], context)
-                     state = %{state | data: Map.put(state.data, key, merged_context)}
-
-                     if cnt + 1 >= state.r_cnt do
-                       cancel_timer(t)
-                       state = %{state | client_request_identifier: Map.delete(state.client_request_identifier, client)}
-                       state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
-                       {val, context} = Context.get_context_summary(state, key)
-                       send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, val, context))
-                       run_node(state)
+#                     if Map.has_key?(state.response_cnt, timer_msg) do
+#                      IO.puts("#{whoami()} has timer_msg in response_cnt #{timer_msg}")
+#                     end
+                     state = case Map.has_key?(state.response_cnt, timer_msg) do
+                       true ->{cnt, _, _, _, t} = state.response_cnt[timer_msg]
+                              state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :get, key, t})}
+                              merged_context = Context.merge_context(state.data[key], context)
+                              state = %{state | data: Map.put(state.data, key, merged_context)}
+#                              IO.puts("#{whoami()} R: #{state.r_cnt}, cur_r: #{cnt + 1}")
+                              if cnt + 1 >= state.r_cnt do
+                                cancel_timer(t)
+                                state = %{state | client_request_identifier: Map.delete(state.client_request_identifier, client)}
+                                state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
+                                {val, context} = Context.get_context_summary(state, key)
+#                                IO.puts("#{whoami()} send coord get response")
+                                send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, val, context))
+                                run_node(state)
+                              end
+                              state
+                       false -> state
                      end
+#                     {cnt, _, _, _, t} = state.response_cnt[timer_msg]
+#                     state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :get, key, t})}
+
 
                      run_node(state)
 
@@ -641,23 +678,30 @@ defmodule DynamoNode do
           h -> case Map.has_key?(state.client_request_identifier, client) do
              true ->
                timer_msg = state.client_request_identifier[client]
-               {cnt, _, _, _, t} = state.response_cnt[timer_msg]
-               state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :get, key, t})}
-               merged_context = Context.merge_context(state.hinted_data[h][key], context)
-               state = %{state | hinted_data: Map.put(state.hinted_data, h, Map.put(state.hinted_data[h], key, merged_context))}
-               if cnt + 1 >= state.r_cnt do
-                 cancel_timer(t)
-                 state = %{state | client_request_identifier: Map.delete(state.client_request_identifier, client)}
-                 state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
-                 {val, context} = Context.get_context_summary_hinted_data(state, key, h)
-                 send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, val, context))
-                 run_node(state)
+               state = case Map.has_key?(state.response_cnt, timer_msg) do
+                 true ->{cnt, _, _, _, t} = state.response_cnt[timer_msg]
+                        state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :get, key, t})}
+                        merged_context = Context.merge_context(state.hinted_data[key], context)
+                        state = %{state | hinted_data: Map.put(state.hinted_data, key, merged_context)}
+                        if cnt + 1 >= state.r_cnt do
+                          cancel_timer(t)
+                          state = %{state | client_request_identifier: Map.delete(state.client_request_identifier, client)}
+                          state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
+                          {val, context} = Context.get_context_summary_hinted_data(state, key)
+                          send(:loadbalancer, CoordinateResponse.new_get_response(client, :ok, key, val, context))
+                          run_node(state)
+                        end
+                        state
+                 false -> state
                end
+#               {cnt, _, _, _, t} = state.response_cnt[timer_msg]
+#               state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :get, key, t})}
+
                run_node(state)
 
              # TODO
-             false ->merged_context = Context.merge_context(state.hinted_data[h][key], context)
-                     state = %{state | hinted_data: Map.put(state.hinted_data, h, Map.put(state.hinted_data[h], key, merged_context))}
+             false ->merged_context = Context.merge_context(state.hinted_data[key], context)
+                     state = %{state | hinted_data: Map.put(state.hinted_data, key, merged_context)}
                      run_node(state)
            end
         end
@@ -669,24 +713,31 @@ defmodule DynamoNode do
          succ: succ,
          hint: hint
        }} ->
-        IO.puts("#{whoami()} received replica put response from #{sender}")
+#        IO.puts("#{whoami()} received replica put response from #{sender}")
         case Map.has_key?(state.client_request_identifier, client) do
           true ->
             timer_msg = state.client_request_identifier[client]
-            {cnt, _, _, _, t} = state.response_cnt[timer_msg]
-            state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :put, key, t})}
-            if cnt + 1 >= state.w_cnt do
-              IO.puts("response")
-              cancel_timer(t)
-              state = %{state | client_request_identifier: Map.delete(state.client_request_identifier, client)}
-              state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
-              {vals, context_summary} = case hint do
-                nil -> Context.get_context_summary(state, key)
-                h -> Context.get_context_summary_hinted_data(state, key, h)
-              end
-              send(:loadbalancer, CoordinateResponse.new_put_response(client, :ok, key, vals, context_summary))
-              run_node(state)
+            state = case Map.has_key?(state.response_cnt, timer_msg) do
+              true ->{cnt, _, _, _, t} = state.response_cnt[timer_msg]
+                     state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :put, key, t})}
+                     if cnt + 1 >= state.w_cnt do
+#                       IO.puts("response")
+                       cancel_timer(t)
+                       state = %{state | client_request_identifier: Map.delete(state.client_request_identifier, client)}
+                       state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
+                       {vals, context_summary} = case hint do
+                         nil -> Context.get_context_summary(state, key)
+                         h -> Context.get_context_summary_hinted_data(state, key)
+                       end
+                       send(:loadbalancer, CoordinateResponse.new_put_response(client, :ok, key, vals, context_summary))
+                       run_node(state)
+                     end
+                     state
+              false -> state
             end
+#            {cnt, _, _, _, t} = state.response_cnt[timer_msg]
+#            state = %{state | response_cnt: Map.put(state.response_cnt, timer_msg, {cnt + 1, client, :put, key, t})}
+
             run_node(state)
 
           false ->
@@ -698,7 +749,7 @@ defmodule DynamoNode do
          key: key,
          data_list: data_list
        }} ->
-        IO.puts("node #{whoami()} received hinted req from #{sender}")
+#        IO.puts("node #{whoami()} received hinted req from #{sender}")
         state = %{state | data: Map.put(state.data, key, Context.merge_context(state.data[key], data_list))}
         send(sender, HintedDataResponse.new(key, :ok))
         run_node(state)
@@ -708,13 +759,18 @@ defmodule DynamoNode do
          key: key,
          succ: succ
        }} ->
-        IO.puts("node #{whoami()} received hinted res from #{sender}")
+#        IO.puts("node #{whoami()} received hinted res from #{sender}")
         state = case succ do
           :ok ->
-            # deleted {key, {v, c}} from hinted_data[sender]
-            new_data_list = Map.delete(Map.get(state.hinted_data, sender), key)
-            # update hinted_data
-            %{state | hinted_data: Map.put(state.hinted_data, sender, new_data_list)}
+            updated_key_list = case Map.has_key?(state.hinted_nodes, sender) do
+              true -> MapSet.delete(state.hinted_nodes[sender], key)
+              false -> MapSet.new()
+            end
+            state = case MapSet.size(updated_key_list) do
+              0 -> %{state | hinted_nodes: Map.delete(state.hinted_nodes, sender)}
+              _ -> %{state | hinted_nodes: Map.put(state.hinted_nodes, sender, updated_key_list)}
+            end
+            state = %{state | hinted_data: Map.delete(state.hinted_data, key)}
 
           :fail ->
             state
@@ -722,24 +778,58 @@ defmodule DynamoNode do
 
         run_node(state)
 
-    {sender, {:reset_heartbeat_timeout, t}} -> run_node(reset_heartbeat_timer(%{state | heartbeat_timeout: t}))
+      {sender,
+        %ReplicaSyncRequest{
+          key_range: key_range
+        }} -> #IO.puts("#{whoami()} received replica sync req from #{sender} with #{key_range}")
+              keys = state.key_range[key_range]
+              data_blocks = Enum.map(keys, fn key -> {key, state.data[key]} end) |> Map.new()
+              send(sender, ReplicaSyncResponse.new(key_range, MerkleTree.new(data_blocks, &merkle_tree_hash_func/1)))
+              run_node(state)
 
-    {sender, {:read_replica, key}} -> {val, context} = Context.get_context_summary(state, key)
-                                      send(sender, {val, context})
+      {sender,
+        %ReplicaSyncResponse{
+          key_range: key_range,
+          merkle_tree: recv_merkle_tree
+        }} -> #IO.puts("#{whoami()} received replica sync res from #{sender}")
+              keys = state.key_range[key_range]
+              state = case keys do
+                nil -> state = %{state | data: Map.merge(state.data, recv_merkle_tree.blocks)}
+                       recv_keys = MapSet.new(Enum.map(recv_merkle_tree.blocks, fn {k, _} -> k end))
+                       state = %{state | key_range: Map.put(state.key_range, key_range, recv_keys)}
+                _ -> data_blocks = Enum.map(keys, fn key -> {key, state.data[key]} end) |> Map.new()
+                     merkle_tree = MerkleTree.new(data_blocks, &merkle_tree_hash_func/1)
+                     state = merkle_tree_data_sync(state, key_range, merkle_tree.root, recv_merkle_tree.root, recv_merkle_tree.blocks)
+              end
+              run_node(state)
+
+      {sender, {:reset_heartbeat_timeout, t}} -> run_node(reset_heartbeat_timer(%{state | heartbeat_timeout: t}))
+
+      {sender, {:reset_gossip_send_timeout, t}} -> run_node(reset_gossip_send_timer(%{state | gossip_send_timeout: t}))
+
+      {sender, {:read_replica, key}} -> {val, context} = Context.get_context_summary(state, key)
+                                        send(sender, {val, context})
+                                        run_node(state)
+
+      {sender, {:read_hinted_replica, key}} -> # IO.puts("#{whoami()} send hinted replica of key #{key}")
+                                                      {val, context} = Context.get_context_summary_hinted_data(state, key)
+                                                      send(sender, {val, context})
+                                                      run_node(state)
+
+      {sender, :read_gossip_table} -> send(sender, state.gossip_table)
                                       run_node(state)
 
-    {sender, {:read_hinted_replica, key, hint}} ->  IO.puts("#{whoami()} send hinted replica of key #{key} hint #{hint}")
-                                                    {val, context} = Context.get_context_summary_hinted_data(state, key, hint)
-                                                    send(sender, {val, context})
-                                                    run_node(state)
+      {sender, :data_sync} -> master_nodes = Enum.slice(state.hash_ring ++ state.hash_ring, (state.self_idx + length(state.node_list) - length(state.preference_list)..(state.self_idx + length(state.node_list) - 1)))
+                              Enum.each(master_nodes, fn target -> send(state.hash_to_node[target], ReplicaSyncRequest.new(target)) end)
+                              run_node(state)
 
-    timer_msg -> case Map.has_key?(state.response_cnt, timer_msg) do
-                  false -> run_node(state)
-                  true -> {cnt, client, method, key, _} = Map.get(state.response_cnt, timer_msg)
-                          send(:loadbalancer, CoordinateResponse.new_get_response(client, :timeout, key, nil, nil))
-                          state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
-                          run_node(state)
-                 end
+      timer_msg -> case Map.has_key?(state.response_cnt, timer_msg) do
+                    false -> run_node(state)
+                    true -> {cnt, client, method, key, _} = Map.get(state.response_cnt, timer_msg)
+                            send(:loadbalancer, CoordinateResponse.new_get_response(client, :timeout, key, nil, nil))
+                            state = %{state | response_cnt: Map.delete(state.response_cnt, timer_msg)}
+                            run_node(state)
+                   end
     end
   end
 end

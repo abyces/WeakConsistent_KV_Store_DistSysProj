@@ -7,20 +7,27 @@ defmodule Context do
   # (stored {val, contexts}, rev_context)
   @spec merge_context(list(), list()) :: list()
   def merge_context(stored_contexts, new_contexts) do
-    res =
-      case stored_contexts do
-        nil -> new_contexts
-        [head | rest] ->
-          case rest do
-            [] ->
-              process_context_entry(head, new_contexts)
+    case new_contexts do
+      nil -> stored_contexts
+      _ -> res =
+             case stored_contexts do
+               nil -> new_contexts
+               [] -> new_contexts
+               [head | rest] ->
+                 case rest do
+                   [] ->
+                     process_context_entry(head, new_contexts)
 
-            _ ->
-              process_context_entry(head, new_contexts) ++
-              merge_context(rest, new_contexts)
-          end
-      end
-    Enum.dedup(Enum.sort(res))
+                   _ ->
+                     process_context_entry(head, new_contexts) ++
+                     merge_context(rest, new_contexts)
+                 end
+             end
+           case res do
+             nil -> []
+             r -> Enum.dedup(Enum.sort(r))
+           end
+    end
   end
 
 
@@ -105,7 +112,7 @@ defmodule Context do
           {val,
            state.node_list
            |> Enum.map(fn node ->
-             case Map.hasKey?(clk, node) do
+             case Map.has_key?(clk, node) do
                true -> {node, clk[node]}
                false -> {node, 0}
              end
@@ -153,33 +160,23 @@ defmodule Context do
 
   @spec get_context_summary(%DynamoNode{}, any()) :: tuple()
   def get_context_summary(state, key) do
-    data = state.data[key]
-    val = Enum.map(data, fn {v, clk} -> v end)
-    context = context_summary_helper(%{}, data)
-    {val, context}
+    case Map.has_key?(state.data, key) do
+      true -> data = Map.get(state.data, key)
+              val = Enum.map(data, fn {v, clk} -> v end)
+              context = context_summary_helper(%{}, data)
+              {val, context}
+      false -> {nil, nil}
+    end
   end
 
-  @spec get_context_summary_hinted_data(%DynamoNode{}, any(), atom()) :: tuple()
-  def get_context_summary_hinted_data(state, key, original_target) do
-
-    data = case Map.has_key?(state.data, key) do
-      true -> state.data[key]
-      false -> state.hinted_data[original_target][key]
+  @spec get_context_summary_hinted_data(%DynamoNode{}, any()) :: tuple()
+  def get_context_summary_hinted_data(state, key) do
+    case Map.has_key?(state.hinted_data, key) do
+      true -> data = Map.get(state.hinted_data, key)
+              val = Enum.map(data, fn {v, clk} -> v end)
+              context = context_summary_helper(%{}, data)
+              {val, context}
+      false -> {nil, nil}
     end
-
-#    local_data = Map.get(state.data, key)
-#    local_hinted_data = Map.get(state.hinted_data[original_target], key)
-#    data = case local_data do
-#      nil -> local_hinted_data
-#      _ -> case local_hinted_data do
-#             nil -> local_data
-#             _ -> Context.merge_context(local_data, local_hinted_data)
-#           end
-#    end
-
-    val = Enum.map(data, fn {v, clk} -> v end)
-    context = context_summary_helper(%{}, data)
-    {val, context}
-
   end
 end

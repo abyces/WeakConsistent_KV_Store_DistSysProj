@@ -13,27 +13,26 @@ defmodule Gossip do
     me = whoami()
     cur_time = System.os_time(:millisecond)
 
-
     new_gossip_table =
       Map.new(state.gossip_table, fn {node_id, {cnt, time, stat}} ->
         if node_id != me do
           case stat do
             :alive ->
               if cur_time - time > state.fail_timeout do
-                {node_id, {cnt, cur_time, :failed}}
+                {node_id, {cnt, time, :failed}}
               else
-                {node_id, {cnt, cur_time, :alive}}
+                {node_id, {cnt, time, :alive}}
               end
 
             :failed ->
-              if cur_time - time > state.cleanup_timeout do
-                {node_id, {cnt, cur_time, :deleted}}
+              if cur_time - time > state.cleanup_timeout + state.fail_timeout do
+                {node_id, {cnt, time, :deleted}}
               else
-                {node_id, {cnt, cur_time, :alive}}
+                {node_id, {cnt, time, :alive}}
               end
 
             :deleted ->
-              {node_id, {cnt, cur_time, :deleted}}
+              {node_id, {cnt, time, :deleted}}
           end
         else
           {node_id, {cnt, time, stat}}
@@ -76,6 +75,9 @@ defmodule Gossip do
   # This function set the gossip_table with particular node_id to be :alive
   @spec gossip_table_set_alive_by_id(%DynamoNode{}, atom()) :: %DynamoNode{}
   def gossip_table_set_alive_by_id(state, node_id) do
+    if nil == state.gossip_table[node_id] do
+      IO.puts(state.gossip_table)
+    end
 
     {cnt, _, _} = state.gossip_table[node_id]
 
@@ -93,6 +95,10 @@ defmodule Gossip do
   # This function updates the heartbeat cnt with particular node_id
   @spec gossip_table_update_heartbeat(%DynamoNode{}, atom()) :: %DynamoNode{}
   def gossip_table_update_heartbeat(state, node_id) do
+    if nil == state.gossip_table[node_id] do
+      IO.puts(state.gossip_table)
+    end
+
     {cnt, _, _} = state.gossip_table[node_id]
 
     %{

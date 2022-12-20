@@ -123,10 +123,9 @@ defmodule LoadBalancer do
         :fail
 
       [hd | tl] ->
-        node = state.hash_to_node[hd]
-
+        {node, nodehash} = {state.hash_to_node[hd], hd}
         case elem(state.node_status[node], 2) do
-          :alive -> node
+          :alive -> {node, nodehash}
           _ -> clockwise_walk(state, tl)
         end
     end
@@ -236,7 +235,7 @@ defmodule LoadBalancer do
          val: v,
          context: context
        }} ->
-        IO.puts("received put req from #{sender}")
+#        IO.puts("received put req from #{sender}")
 
         hash_key =
           String.to_integer(:crypto.hash(:md5, k) |> Base.encode16(), 16)
@@ -252,33 +251,25 @@ defmodule LoadBalancer do
           :alive ->
             send(
               origin_target_node,
-              CoordinateRequest.new_put_request(sender, nil, k, v, context)
+              CoordinateRequest.new_put_request(sender, nil, k, v, context, node_hash_val)
             )
             timer_msg = get_load_balancer_hash_timer_msg(sender, :put, k)
             state = %{state | client_timer_msg: Map.put(state.client_timer_msg, sender, timer_msg)}
             state = %{state | request_record: Map.put(state.request_record, timer_msg, {sender, :put, k, timer(state.request_timeout, timer_msg)})}
             run_loadbalancer(state)
 
-          _ -> IO.puts("origin target #{origin_target_node} is dead")
+          _ -> #IO.puts("origin target #{origin_target_node} is dead")
             case clockwise_walk(
                    state,
                    Enum.slice(
-                     state.hash_ring,
-                     (origin_hash_idx + state.replica_cnt)..(state.node_cnt - 1)
-                   ) ++
-                     Enum.slice(
-                       state.hash_ring,
-                       max(
-                         0,
-                         -(state.node_cnt - origin_hash_idx - state.replica_cnt)
-                       )..(origin_hash_idx - 1)
-                     )
+                     state.hash_ring ++ state.hash_ring,
+                     (origin_hash_idx + min(state.replica_cnt + 1, length(state.view) - 1))..(origin_hash_idx + length(state.view) - 1)
+                   )
                  ) do
               :fail ->
-                IO.puts(state.node_status)
                 send(sender, ClientResponse.new_response(:fail, :put, k, nil, nil))
                 run_loadbalancer(state)
-              n ->
+              {n, n_hash} ->
                 send(
                   n,
                   CoordinateRequest.new_put_request(
@@ -286,7 +277,8 @@ defmodule LoadBalancer do
                     origin_target_node,
                     k,
                     v,
-                    context
+                    context,
+                    n_hash
                   )
                 )
                 timer_msg = get_load_balancer_hash_timer_msg(sender, :put, k)
@@ -301,7 +293,7 @@ defmodule LoadBalancer do
        %ClientGetRequest{
          key: k
        }} ->
-        IO.puts("received get req from #{sender}")
+#        IO.puts("received get req from #{sender}")
 
         hash_key =
           String.to_integer(:crypto.hash(:md5, k) |> Base.encode16(), 16)
@@ -324,21 +316,14 @@ defmodule LoadBalancer do
             case clockwise_walk(
                    state,
                    Enum.slice(
-                     state.hash_ring,
-                     (origin_hash_idx + 1)..(state.node_cnt - 1)
-                   ) ++
-                     Enum.slice(
-                       state.hash_ring,
-                       max(
-                         0,
-                         -(state.node_cnt - origin_hash_idx - 1)
-                       )..(origin_hash_idx - 1)
-                     )
+                     state.hash_ring ++ state.hash_ring,
+                     (origin_hash_idx + 1)..(origin_hash_idx + min(state.replica_cnt + 1, length(state.view) - 1))
+                   )
                  ) do
               :fail ->
-                send(sender, ClientResponse.new_response(:fail, nil))
+                send(sender, ClientResponse.new_response(:fail, :get, k, nil, nil))
                 run_loadbalancer(state)
-              n ->
+              {n, n_hash} ->
                 send(
                   n,
                   CoordinateRequest.new_get_request(
@@ -363,7 +348,7 @@ defmodule LoadBalancer do
          val: val,
          context: context
        }} ->
-          IO.puts("here response")
+#          IO.puts("here response")
           send(client, ClientResponse.new_response(succ, method, k, val, context))
           timer_msg = state.client_timer_msg[client]
           state = case Map.has_key?(state.request_record, timer_msg) do
@@ -374,10 +359,9 @@ defmodule LoadBalancer do
           end
           run_loadbalancer(state)
 
-       timer_msg -> IO.puts("timer_msg")
+       timer_msg -> #IO.puts("timer_msg")
                     case Map.has_key?(state.request_record, timer_msg) do
-                      true -> IO.puts(state.request_record[timer_msg])
-                              {client, method, key, _} = Map.get(state.request_record, timer_msg)
+                      true -> {client, method, key, _} = Map.get(state.request_record, timer_msg)
                               send(client, ClientResponse.new_response(:timeout, method, key, nil, nil))
                               state = %{state | client_timer_msg: Map.delete(state.client_timer_msg, client)}
                               state = %{state | request_record: Map.delete(state.request_record, timer_msg)}
