@@ -97,12 +97,15 @@ defmodule ConsistencyTest do
 
   test "measure consistency" do
 
-    {:ok, file} = File.open("measure.txt", [:append])
+    {:ok, file} = File.open("measure311.txt", [:append])
 
     view = [:a, :b, :c, :d, :e, :f, :g, :h, :i, :j, :k, :l, :m, :n, :o, :p, :q, :r, :s, :t]
-    msg_drop_rate = [0.0, 0.01, 0.05, 0.1, 0.2 ,0.25, 0.5]
-    msg_delay = [0.0, 1.0, 5.0, 10.0, 20.0, 50.0]
-    fail_rate = [0.0, 0.05, 0.1, 0.2, 0.25, 0.5]
+#    msg_drop_rate = [0.0, 0.01, 0.05, 0.1, 0.2 ,0.25, 0.5]
+    msg_drop_rate = [0.0]
+#    msg_delay = [0.0, 1.0, 5.0, 10.0, 20.0, 50.0]
+    msg_delay = [30.0, 40.0]
+#    fail_rate = [0.0, 0.05, 0.1, 0.2, 0.25, 0.5]
+    fail_rate = [0.0]
     r = 1
     w = 1
     n = 3
@@ -112,7 +115,7 @@ defmodule ConsistencyTest do
           res = for i <- 1..100 do
             test_with_diff_args(view, drop, delay, r, w, n, fail)
           end
-          res = "20," <> Float.to_string(drop) <> "," <> Float.to_string(delay) <> ","  <> Float.to_string(fail) <> ",1" <> ",1" <> ",3," <> Integer.to_string(Enum.sum(res)) <> "\n"
+          res = "20," <> Float.to_string(drop) <> "," <> Float.to_string(delay) <> ","  <> Float.to_string(fail) <> ",2" <> ",2" <> ",5," <> Integer.to_string(Enum.sum(res)) <> "\n"
           IO.puts(res)
           IO.write(file, res)
         end
